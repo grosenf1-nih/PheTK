@@ -21,6 +21,10 @@ setuptools.setup(
     url="https://github.com/grosenf1-nih/PheTK",
     package_dir={"": "src"},
     packages=setuptools.find_packages(where="src"),
+    include_package_data=True,
+    package_data={
+        "PheTK": ["phecode/*.csv"]
+    },
     install_requires=parse_requirements("requirements.txt"),
     python_requires=">=3.7",
     classifiers=[
