@@ -33,7 +33,8 @@ class PheWAS:
                  use_exclusion=False,
                  output_file_name=None,
                  verbose=False,
-                 suppress_warnings=True):
+                 suppress_warnings=True,
+                 use_firth=False):
         """
         :param phecode_version: accepts "1.2" or "X"
         :param phecode_count_csv_path: path to phecode count of relevant participants at minimum
@@ -56,8 +57,9 @@ class PheWAS:
         :param verbose: defaults to False; if True, print brief result of each phecode run
         :param suppress_warnings: defaults to True;
                                   if True, ignore common exception warnings such as ConvergenceWarnings, etc.
-        """
-        print("~~~~~~~~~~~~~~~~~~~~~~~~    Creating PheWAS Object    ~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        :param use_firth: whether to use Firth's penalized logistic regression (requires firthlogist package);
+         """
+         print("~~~~~~~~~~~~~~~~~~~~~~~~    Creating PheWAS Object    ~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
         # load phecode mapping file by version or by custom path
         self.phecode_df = _utils.get_phecode_mapping_table(
@@ -87,6 +89,7 @@ class PheWAS:
         self.min_cases = min_cases
         self.min_phecode_count = min_phecode_count
         self.suppress_warnings = suppress_warnings
+        self.use_firth = use_firth
 
         # assign 1 & 0 to male & female based on male_as_one parameter
         if male_as_one:
@@ -436,26 +439,65 @@ class PheWAS:
             y = regressors["y"].to_numpy()
             regressors = regressors[analysis_var_cols].to_numpy()
             regressors = sm.tools.add_constant(regressors, prepend=False)
-            logit = sm.Logit(y, regressors, missing="drop")
-
-            # catch Singular matrix error
-            try:
-                result = logit.fit(disp=False)
-            except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
-                if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+            # choose regression method: standard logistic or Firth penalized
+            if self.use_firth:
+                try:
+                    from firthlogist import FirthLogisticRegression
+                    # use manual intercept since we added constant
+                    model = FirthLogisticRegression(fit_intercept=False)
+                    # drop missing values in X or y (mimic missing='drop')
+                    import numpy as _np
+                    mask = ~_np.isnan(y) & (~_np.isnan(regressors).any(axis=1))
+                    X_fit = regressors[mask]
+                    y_fit = y[mask]
+                    result = model.fit(X_fit, y_fit)
+                except ImportError:
+                    raise ImportError("To use Firth regression, please install the 'firthlogist' package.")
+                except Exception as err:
+                    # catch convergence or other fitting errors and continue
                     if self.verbose:
-                        print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
-                    pass
-                else:
-                    raise
-                result = None
+                        print(f"Phecode {phecode} Firth regression error: {err}\n")
+                    result = None
+            else:
+                logit = sm.Logit(y, regressors, missing="drop")
+                try:
+                    result = logit.fit(disp=False)
+                except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
+                    if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+                        if self.verbose:
+                            print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
+                        result = None
+                    else:
+                        raise
 
             if result is not None:
                 # process result
                 base_dict = {"phecode": phecode,
                              "cases": len(cases),
                              "controls": len(controls)}
-                stats_dict = self._result_prep(result=result, var_of_interest_index=var_index)
+                # extract statistics
+                if self.use_firth:
+                    coef = result.coef_
+                    pvals = result.pvals_
+                    cis = result.ci_
+                    beta = coef[var_index]
+                    p_value = pvals[var_index]
+                    conf_int_1, conf_int_2 = cis[var_index]
+                    odds_ratio = np.exp(beta)
+                    neg_log_p_value = -np.log10(p_value)
+                    log10_odds_ratio = np.log10(odds_ratio)
+                    # assume Firth always converges if no error
+                    converged = True
+                    stats_dict = {"p_value": p_value,
+                                  "neg_log_p_value": neg_log_p_value,
+                                  "beta": beta,
+                                  "conf_int_1": conf_int_1,
+                                  "conf_int_2": conf_int_2,
+                                  "odds_ratio": odds_ratio,
+                                  "log10_odds_ratio": log10_odds_ratio,
+                                  "converged": converged}
+                else:
+                    stats_dict = self._result_prep(result=result, var_of_interest_index=var_index)
                 result_dict = {**base_dict, **stats_dict}  # python 3.5 or later
                 # result_dict = base_dict | stats_dict  # python 3.9 or later
 
