@@ -59,7 +59,7 @@ class PheWAS:
                                   if True, ignore common exception warnings such as ConvergenceWarnings, etc.
         :param use_firth: whether to use Firth's penalized logistic regression (requires firthlogist package);
          """
-         print("~~~~~~~~~~~~~~~~~~~~~~~~    Creating PheWAS Object    ~~~~~~~~~~~~~~~~~~~~~~~~~~")
+        print("~~~~~~~~~~~~~~~~~~~~~~~~    Creating PheWAS Object    ~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
         # load phecode mapping file by version or by custom path
         self.phecode_df = _utils.get_phecode_mapping_table(
