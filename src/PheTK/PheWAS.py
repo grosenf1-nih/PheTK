@@ -446,11 +446,21 @@ class PheWAS:
                     # use manual intercept since we added constant
                     model = FirthLogisticRegression(fit_intercept=False)
                     # drop missing values in X or y (mimic missing='drop')
-                    import numpy as _np
+                    import numpy as _np, types
                     mask = ~_np.isnan(y) & (~_np.isnan(regressors).any(axis=1))
                     X_fit = regressors[mask]
                     y_fit = y[mask]
-                    result = model.fit(X_fit, y_fit)
+                    try:
+                        result = model.fit(X_fit, y_fit)
+                    except AttributeError as attr_err:
+                        if '_validate_data' in str(attr_err):
+                            # monkey-patch missing validation method
+                            def _validate_data(self, X, y=None, reset=True, **kwargs):
+                                return X, y
+                            model._validate_data = types.MethodType(_validate_data, model)
+                            result = model.fit(X_fit, y_fit)
+                        else:
+                            raise
                 except ImportError:
                     raise ImportError("To use Firth regression, please install the 'firthlogist' package.")
                 except Exception as err:
