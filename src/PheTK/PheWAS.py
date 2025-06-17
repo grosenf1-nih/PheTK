@@ -436,49 +436,65 @@ class PheWAS:
             # logistic regression
             if self.suppress_warnings:
                 warnings.simplefilter("ignore")
+            # prepare data for regression: convert to numpy and add constant
             y = regressors["y"].to_numpy()
-            regressors = regressors[analysis_var_cols].to_numpy()
-            regressors = sm.tools.add_constant(regressors, prepend=False)
-            # choose regression method: standard logistic or Firth penalized
-            if self.use_firth:
-                try:
-                    from firthlogist import FirthLogisticRegression
-                    # use manual intercept since we added constant
-                    model = FirthLogisticRegression(fit_intercept=False)
-                    # drop missing values in X or y (mimic missing='drop')
-                    import numpy as _np, types
-                    mask = ~_np.isnan(y) & (~_np.isnan(regressors).any(axis=1))
-                    X_fit = regressors[mask]
-                    y_fit = y[mask]
-                    try:
-                        result = model.fit(X_fit, y_fit)
-                    except AttributeError as attr_err:
-                        if '_validate_data' in str(attr_err):
-                            # monkey-patch missing validation method
-                            def _validate_data(self, X, y=None, reset=True, **kwargs):
-                                return X, y
-                            model._validate_data = types.MethodType(_validate_data, model)
-                            result = model.fit(X_fit, y_fit)
-                        else:
-                            raise
-                except ImportError:
-                    raise ImportError("To use Firth regression, please install the 'firthlogist' package.")
-                except Exception as err:
-                    # catch convergence or other fitting errors and continue
-                    if self.verbose:
-                        print(f"Phecode {phecode} Firth regression error: {err}\n")
-                    result = None
+            data_mat = regressors[analysis_var_cols].to_numpy()
+            data_mat = sm.tools.add_constant(data_mat, prepend=False)
+            # drop missing values (mimic missing='drop')
+            import numpy as _np
+            mask = ~_np.isnan(y) & (~_np.isnan(data_mat).any(axis=1))
+            y_fit = y[mask]
+            X_fit = data_mat[mask]
+            # ensure variant has both carriers and non-carriers in both cases and controls
+            var_col = X_fit[:, var_index]
+            cases_mask = y_fit == 1
+            controls_mask = y_fit == 0
+            carriers_cases = int(var_col[cases_mask].sum())
+            non_carriers_cases = int(cases_mask.sum() - carriers_cases)
+            carriers_controls = int(var_col[controls_mask].sum())
+            non_carriers_controls = int(controls_mask.sum() - carriers_controls)
+            if (carriers_cases == 0 or non_carriers_cases == 0 or
+                carriers_controls == 0 or non_carriers_controls == 0):
+                if self.verbose:
+                    print(
+                        f"Phecode {phecode}: insufficient variant distribution "
+                        f"(cases → carriers={carriers_cases}, non-carriers={non_carriers_cases}; "
+                        f"controls → carriers={carriers_controls}, non-carriers={non_carriers_controls}). Skipping.\n"
+                    )
+                result = None
             else:
-                logit = sm.Logit(y, regressors, missing="drop")
-                try:
-                    result = logit.fit(disp=False)
-                except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
-                    if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+                # choose regression method: standard logistic or Firth penalized
+                if self.use_firth:
+                    try:
+                        from firthlogist import FirthLogisticRegression  # type: ignore
+                        model = FirthLogisticRegression(fit_intercept=False)
+                        # attempt to fit, catch missing validation API
+                        try:
+                            result = model.fit(X_fit, y_fit)
+                        except AttributeError as attr_err:
+                            if '_validate_data' in str(attr_err):
+                                import types
+                                # monkey-patch missing _validate_data method
+                                def _validate_data(self, X, y=None, reset=True, **kwargs):
+                                    return X, y
+                                model._validate_data = types.MethodType(_validate_data, model)
+                                result = model.fit(X_fit, y_fit)
+                            else:
+                                raise
+                    except ImportError:
+                        raise ImportError("To use Firth regression, please install the 'firthlogist' package.")
+                    except Exception as err:
+                        if self.verbose:
+                            print(f"Phecode {phecode} Firth regression error: {err}\n")
+                        result = None
+                else:
+                    try:
+                        logit = sm.Logit(y_fit, X_fit)
+                        result = logit.fit(disp=False)
+                    except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
                         if self.verbose:
                             print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
                         result = None
-                    else:
-                        raise
 
             if result is not None:
                 # process result
