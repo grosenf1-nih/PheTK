@@ -13,3 +13,4 @@ statsmodels
 firthlogist
 tqdm
 setuptools
+firthlogist
