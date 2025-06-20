@@ -1,4 +1,3 @@
 include README.md
 include LICENSE
-recursive-include src *
-include src/PheTK/phecode/*.csv
+recursive-include src/PheTK/phecode *.csv
