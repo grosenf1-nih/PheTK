@@ -125,11 +125,13 @@ class PheWAS:
     variants or other variables of interest and phenotypes.
     """
 
-    def __init__(self, config: PheWASConfig):
+    def __init__(self, config_or_phecode_version=None, **kwargs):
         """Initialize PheWAS analysis object.
         
         Args:
-            config: PheWASConfig object containing all analysis parameters.
+            config_or_phecode_version: Either a PheWASConfig object (new approach) 
+                                     or phecode_version string (legacy approach).
+            **kwargs: Legacy parameters for backward compatibility.
             
         Raises:
             InvalidDataError: If input data is invalid or malformed.
@@ -137,7 +139,22 @@ class PheWAS:
         """
         logger.info("Creating PheWAS Object")
         
-        self.config = config
+        # Handle backward compatibility
+        if isinstance(config_or_phecode_version, PheWASConfig):
+            # New approach: config object provided
+            self.config = config_or_phecode_version
+        elif isinstance(config_or_phecode_version, str) or config_or_phecode_version is None:
+            # Legacy approach: individual parameters provided
+            if config_or_phecode_version is not None:
+                kwargs['phecode_version'] = config_or_phecode_version
+            
+            # Create config from legacy parameters
+            self.config = self._create_config_from_legacy_params(**kwargs)
+        else:
+            raise InvalidDataError(
+                "First argument must be either a PheWASConfig object or phecode_version string"
+            )
+        
         self._initialize_data_attributes()
         self._load_data()
         self._setup_sex_encoding()
@@ -147,6 +164,45 @@ class PheWAS:
         self._setup_output_filename()
         
         logger.info("PheWAS object created successfully")
+
+    def _create_config_from_legacy_params(self, **kwargs) -> PheWASConfig:
+        """Create PheWASConfig from legacy parameters for backward compatibility."""
+        # Map legacy parameter names to config parameter names
+        legacy_mapping = {
+            'phecode_count_csv_path': 'phecode_count_csv_path',
+            'cohort_csv_path': 'cohort_csv_path', 
+            'sex_at_birth_col': 'sex_at_birth_col',
+            'covariate_cols': 'covariate_cols',
+            'independent_variable_of_interest': 'independent_variable_of_interest',
+            'male_as_one': 'male_as_one',
+            'icd_version': 'icd_version',
+            'phecode_map_file_path': 'phecode_map_file_path',
+            'phecode_to_process': 'phecode_to_process',
+            'min_cases': 'min_cases',
+            'min_phecode_count': 'min_phecode_count',
+            'use_exclusion': 'use_exclusion',
+            'output_file_name': 'output_file_name',
+            'verbose': 'verbose',
+            'suppress_warnings': 'suppress_warnings',
+            'use_firth': 'use_firth'
+        }
+        
+        # Extract and validate required parameters
+        required_params = ['phecode_version', 'phecode_count_csv_path', 'cohort_csv_path', 
+                          'sex_at_birth_col', 'covariate_cols', 'independent_variable_of_interest']
+        
+        config_params = {}
+        for param in required_params:
+            if param not in kwargs:
+                raise InvalidDataError(f"Required parameter '{param}' is missing")
+            config_params[param] = kwargs[param]
+        
+        # Add optional parameters with defaults
+        for legacy_param, config_param in legacy_mapping.items():
+            if legacy_param in kwargs and legacy_param not in required_params:
+                config_params[config_param] = kwargs[legacy_param]
+        
+        return PheWASConfig(**config_params)
 
     def _initialize_data_attributes(self) -> None:
         """Initialize all data attributes."""
@@ -475,18 +531,31 @@ class PheWAS:
         # Generate cases and controls
         cases, controls = self._generate_cases_controls(
             phecode, phecode_counts, covariate_df, phecode_df
-        )
-
-        # Remove duplicates and select columns
+        )        # Remove duplicates and select columns
         return self._finalize_case_control_data(
             cases, controls, analysis_var_cols, keep_ids
         )
 
     def _get_sex_restriction(self, phecode: str, phecode_df: pl.DataFrame) -> Optional[str]:
         """Get sex restriction for a phecode."""
-        filtered_df = phecode_df.filter(pl.col("phecode") == phecode)
-        sex_values = filtered_df["sex"].unique().to_list()
-        return sex_values[0] if sex_values else None
+        if phecode_df is None:
+            raise ValueError("phecode_df cannot be None")
+        
+        if not isinstance(phecode_df, pl.DataFrame):
+            raise TypeError(
+                f"Expected pl.DataFrame for phecode_df, got {type(phecode_df)}. "
+                f"Value: {phecode_df}"
+            )
+        
+        try:
+            filtered_df = phecode_df.filter(pl.col("phecode") == phecode)
+            sex_values = filtered_df["sex"].unique().to_list()
+            return sex_values[0] if sex_values else None
+        except Exception as e:
+            logger.error(f"Error filtering phecode_df for phecode {phecode}: {e}")
+            logger.error(f"phecode_df type: {type(phecode_df)}")
+            logger.error(f"phecode_df shape: {phecode_df.shape if hasattr(phecode_df, 'shape') else 'No shape attribute'}")
+            raise
 
     def _filter_by_sex_restriction(
         self, 
@@ -617,8 +686,7 @@ class PheWAS:
             "beta": beta,
             "conf_int_1": conf_int_1,
             "conf_int_2": conf_int_2,
-            "odds_ratio": odds_ratio,
-            "log10_odds_ratio": log10_odds_ratio,
+            "odds_ratio": odds_ratio,            "log10_odds_ratio": log10_odds_ratio,
             "converged": converged
         }
 
@@ -628,7 +696,8 @@ class PheWAS:
         phecode_counts: Optional[pl.DataFrame] = None, 
         covariate_df: Optional[pl.DataFrame] = None,
         var_cols: Optional[List[str]] = None, 
-        gender_specific_var_cols: Optional[List[str]] = None
+        gender_specific_var_cols: Optional[List[str]] = None,
+        phecode_df: Optional[pl.DataFrame] = None
     ) -> Optional[Dict[str, Union[str, int, float, bool]]]:
         """Perform logistic regression for a single phecode.
         
@@ -638,13 +707,31 @@ class PheWAS:
             covariate_df: Covariate dataframe.
             var_cols: Variable columns for general case.
             gender_specific_var_cols: Variable columns for gender-specific case.
+            phecode_df: Phecode mapping dataframe.
             
         Returns:
             Dictionary with regression results or None if regression failed.
         """
+        # Use provided dataframes or fall back to instance variables
+        if phecode_counts is None:
+            phecode_counts = self.phecode_counts
+        if covariate_df is None:
+            covariate_df = self.covariate_df
+        if phecode_df is None:
+            phecode_df = self.phecode_df
+        if var_cols is None:
+            var_cols = self.var_cols
+        if gender_specific_var_cols is None:
+            gender_specific_var_cols = self.gender_specific_var_cols
+            
         # Prepare case-control data
         cases, controls, analysis_var_cols = self._case_control_prep(
-            phecode, phecode_counts, covariate_df, var_cols, gender_specific_var_cols
+            phecode=phecode, 
+            phecode_counts=phecode_counts, 
+            covariate_df=covariate_df, 
+            phecode_df=phecode_df,
+            var_cols=var_cols, 
+            gender_specific_var_cols=gender_specific_var_cols
         )
 
         # Check minimum case/control requirements
@@ -890,7 +977,8 @@ class PheWAS:
                     self.phecode_counts.clone(),
                     self.covariate_df.clone(),
                     copy.deepcopy(self.var_cols),
-                    copy.deepcopy(self.gender_specific_var_cols)
+                    copy.deepcopy(self.gender_specific_var_cols),
+                    self.phecode_df.clone()
                 ) for phecode in self.phecode_list
             ]
             result_dicts = [
@@ -937,7 +1025,8 @@ class PheWAS:
 
 def create_phewas_from_args(args) -> PheWAS:
     """Create PheWAS object from command line arguments."""
-    config = PheWASConfig(
+    # Use legacy parameter style for backward compatibility
+    return PheWAS(
         phecode_version=args.phecode_version,
         phecode_count_csv_path=args.phecode_count_csv_path,
         cohort_csv_path=args.cohort_csv_path,
@@ -951,7 +1040,6 @@ def create_phewas_from_args(args) -> PheWAS:
         min_phecode_count=args.min_phecode_count,
         output_file_name=args.output_file_name
     )
-    return PheWAS(config)
 
 
 def main() -> None:
