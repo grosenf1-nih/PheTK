@@ -13,7 +13,6 @@ import sys
 import warnings
 # noinspection PyUnresolvedReferences,PyProtectedMember
 from PheTK import _utils
-import firthlogist
 
 
 class PheWAS:
@@ -34,7 +33,8 @@ class PheWAS:
                  use_exclusion=False,
                  output_file_name=None,
                  verbose=False,
-                 suppress_warnings=True):
+                 suppress_warnings=True,
+                 use_firth=False):
         """
         :param phecode_version: accepts "1.2" or "X"
         :param phecode_count_csv_path: path to phecode count of relevant participants at minimum
@@ -57,7 +57,8 @@ class PheWAS:
         :param verbose: defaults to False; if True, print brief result of each phecode run
         :param suppress_warnings: defaults to True;
                                   if True, ignore common exception warnings such as ConvergenceWarnings, etc.
-        """
+        :param use_firth: whether to use Firth's penalized logistic regression (requires firthlogist package);
+         """
         print("~~~~~~~~~~~~~~~~~~~~~~~~    Creating PheWAS Object    ~~~~~~~~~~~~~~~~~~~~~~~~~~")
 
         # load phecode mapping file by version or by custom path
@@ -88,6 +89,7 @@ class PheWAS:
         self.min_cases = min_cases
         self.min_phecode_count = min_phecode_count
         self.suppress_warnings = suppress_warnings
+        self.use_firth = use_firth
 
         # assign 1 & 0 to male & female based on male_as_one parameter
         if male_as_one:
@@ -392,16 +394,14 @@ class PheWAS:
 
     def _logistic_regression(self, phecode,
                              phecode_counts=None, covariate_df=None,
-                             var_cols=None, gender_specific_var_cols=None,
-                             method="logistic"):
+                             var_cols=None, gender_specific_var_cols=None):
         """
-        Logistic or Firth regression of single phecode
+        Logistic regression of single phecode
         :param phecode: phecode of interest
         :param phecode_counts: phecode counts table for cohort
         :param covariate_df: covariate table for cohort
         :param var_cols: variable columns in general case
         :param gender_specific_var_cols: variable columns in gender-specific case
-        :param method: 'logistic' (default) or 'firth'
         :return: result_dict object
         """
 
@@ -433,47 +433,99 @@ class PheWAS:
             # get index of variable of interest
             var_index = regressors[analysis_var_cols].columns.index(self.independent_variable_of_interest)
 
+            # logistic regression
             if self.suppress_warnings:
                 warnings.simplefilter("ignore")
+            # prepare data for regression: convert to numpy and add constant
             y = regressors["y"].to_numpy()
-            regressors_np = regressors[analysis_var_cols].to_numpy()
-            regressors_np = sm.tools.add_constant(regressors_np, prepend=False)
-
-            # Choose regression method
-            if method == "firth":
-                try:
-                    # firthlogist expects pandas DataFrame for X and Series for y
-                    import firthlogist
-                    X_df = pd.DataFrame(regressors_np, columns=["const"] + analysis_var_cols if regressors_np.shape[1] == len(analysis_var_cols) + 1 else analysis_var_cols)
-                    y_series = pd.Series(y)
-                    result = firthlogist.firthlogist(X_df, y_series)
-                except ImportError:
-                    print("firthlogist is not installed. Please install it to use Firth regression.")
-                    return None
-                except Exception as err:
-                    if self.verbose:
-                        print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
-                    result = None
+            data_mat = regressors[analysis_var_cols].to_numpy()
+            data_mat = sm.tools.add_constant(data_mat, prepend=False)
+            # drop missing values (mimic missing='drop')
+            import numpy as _np
+            mask = ~_np.isnan(y) & (~_np.isnan(data_mat).any(axis=1))
+            y_fit = y[mask]
+            X_fit = data_mat[mask]
+            # ensure variant has both carriers and non-carriers in both cases and controls
+            var_col = X_fit[:, var_index]
+            cases_mask = y_fit == 1
+            controls_mask = y_fit == 0
+            carriers_cases = int(var_col[cases_mask].sum())
+            non_carriers_cases = int(cases_mask.sum() - carriers_cases)
+            carriers_controls = int(var_col[controls_mask].sum())
+            non_carriers_controls = int(controls_mask.sum() - carriers_controls)
+            if (carriers_cases == 0 or non_carriers_cases == 0 or
+                carriers_controls == 0 or non_carriers_controls == 0):
+                if self.verbose:
+                    print(
+                        f"Phecode {phecode}: insufficient variant distribution "
+                        f"(cases → carriers={carriers_cases}, non-carriers={non_carriers_cases}; "
+                        f"controls → carriers={carriers_controls}, non-carriers={non_carriers_controls}). Skipping.\n"
+                    )
+                result = None
             else:
-                logit = sm.Logit(y, regressors_np, missing="drop")
-                try:
-                    result = logit.fit(disp=False)
-                except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
-                    if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+                # choose regression method: standard logistic or Firth penalized
+                if self.use_firth:
+                    try:
+                        from firthlogist import FirthLogisticRegression  # type: ignore
+                        model = FirthLogisticRegression(fit_intercept=False)
+                        # attempt to fit, catch missing validation API
+                        try:
+                            result = model.fit(X_fit, y_fit)
+                        except AttributeError as attr_err:
+                            if '_validate_data' in str(attr_err):
+                                import types
+                                # monkey-patch missing _validate_data method
+                                def _validate_data(self, X, y=None, reset=True, **kwargs):
+                                    return X, y
+                                model._validate_data = types.MethodType(_validate_data, model)
+                                result = model.fit(X_fit, y_fit)
+                            else:
+                                raise
+                    except ImportError:
+                        raise ImportError("To use Firth regression, please install the 'firthlogist' package.")
+                    except Exception as err:
+                        if self.verbose:
+                            print(f"Phecode {phecode} Firth regression error: {err}\n")
+                        result = None
+                else:
+                    try:
+                        logit = sm.Logit(y_fit, X_fit)
+                        result = logit.fit(disp=False)
+                    except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
                         if self.verbose:
                             print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
-                        pass
-                    else:
-                        raise
-                    result = None
+                        result = None
 
             if result is not None:
                 # process result
                 base_dict = {"phecode": phecode,
                              "cases": len(cases),
                              "controls": len(controls)}
-                stats_dict = self._result_prep(result=result, var_of_interest_index=var_index)
+                # extract statistics
+                if self.use_firth:
+                    coef = result.coef_
+                    pvals = result.pvals_
+                    cis = result.ci_
+                    beta = coef[var_index]
+                    p_value = pvals[var_index]
+                    conf_int_1, conf_int_2 = cis[var_index]
+                    odds_ratio = np.exp(beta)
+                    neg_log_p_value = -np.log10(p_value)
+                    log10_odds_ratio = np.log10(odds_ratio)
+                    # assume Firth always converges if no error
+                    converged = True
+                    stats_dict = {"p_value": p_value,
+                                  "neg_log_p_value": neg_log_p_value,
+                                  "beta": beta,
+                                  "conf_int_1": conf_int_1,
+                                  "conf_int_2": conf_int_2,
+                                  "odds_ratio": odds_ratio,
+                                  "log10_odds_ratio": log10_odds_ratio,
+                                  "converged": converged}
+                else:
+                    stats_dict = self._result_prep(result=result, var_of_interest_index=var_index)
                 result_dict = {**base_dict, **stats_dict}  # python 3.5 or later
+                # result_dict = base_dict | stats_dict  # python 3.9 or later
 
                 # choose to see results on the fly
                 if self.verbose:
@@ -488,14 +540,12 @@ class PheWAS:
 
     def run(self,
             parallelization="multithreading",
-            n_threads=round(os.cpu_count()*2/3),
-            method="logistic"):
+            n_threads=round(os.cpu_count()*2/3)):
         """
-        Run parallel logistic or Firth regressions
+        Run parallel logistic regressions
         :param parallelization: defaults to "multithreading", utilizing concurrent.futures.ThreadPoolExecutor();
                                 if "multiprocessing": use multiprocessing.Pool()
         :param n_threads: number of threads in multithreading
-        :param method: 'logistic' (default) or 'firth'
         :return: PheWAS summary statistics Polars dataframe
         """
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~    Running PheWAS    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -509,8 +559,7 @@ class PheWAS:
                         self.phecode_counts.clone(),
                         self.covariate_df.clone(),
                         copy.deepcopy(self.var_cols),
-                        copy.deepcopy(self.gender_specific_var_cols),
-                        method
+                        copy.deepcopy(self.gender_specific_var_cols)
                     ) for phecode in self.phecode_list
                 ]
                 result_dicts = [job.result() for job in tqdm(as_completed(jobs), total=len(self.phecode_list))]
