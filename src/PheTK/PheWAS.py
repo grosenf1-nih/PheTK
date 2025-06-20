@@ -13,6 +13,7 @@ import sys
 import warnings
 # noinspection PyUnresolvedReferences,PyProtectedMember
 from PheTK import _utils
+import firthlogist
 
 
 class PheWAS:
@@ -391,14 +392,16 @@ class PheWAS:
 
     def _logistic_regression(self, phecode,
                              phecode_counts=None, covariate_df=None,
-                             var_cols=None, gender_specific_var_cols=None):
+                             var_cols=None, gender_specific_var_cols=None,
+                             method="logistic"):
         """
-        Logistic regression of single phecode
+        Logistic or Firth regression of single phecode
         :param phecode: phecode of interest
         :param phecode_counts: phecode counts table for cohort
         :param covariate_df: covariate table for cohort
         :param var_cols: variable columns in general case
         :param gender_specific_var_cols: variable columns in gender-specific case
+        :param method: 'logistic' (default) or 'firth'
         :return: result_dict object
         """
 
@@ -430,25 +433,39 @@ class PheWAS:
             # get index of variable of interest
             var_index = regressors[analysis_var_cols].columns.index(self.independent_variable_of_interest)
 
-            # logistic regression
             if self.suppress_warnings:
                 warnings.simplefilter("ignore")
             y = regressors["y"].to_numpy()
-            regressors = regressors[analysis_var_cols].to_numpy()
-            regressors = sm.tools.add_constant(regressors, prepend=False)
-            logit = sm.Logit(y, regressors, missing="drop")
+            regressors_np = regressors[analysis_var_cols].to_numpy()
+            regressors_np = sm.tools.add_constant(regressors_np, prepend=False)
 
-            # catch Singular matrix error
-            try:
-                result = logit.fit(disp=False)
-            except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
-                if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+            # Choose regression method
+            if method == "firth":
+                try:
+                    # firthlogist expects pandas DataFrame for X and Series for y
+                    import firthlogist
+                    X_df = pd.DataFrame(regressors_np, columns=["const"] + analysis_var_cols if regressors_np.shape[1] == len(analysis_var_cols) + 1 else analysis_var_cols)
+                    y_series = pd.Series(y)
+                    result = firthlogist.firthlogist(X_df, y_series)
+                except ImportError:
+                    print("firthlogist is not installed. Please install it to use Firth regression.")
+                    return None
+                except Exception as err:
                     if self.verbose:
                         print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
-                    pass
-                else:
-                    raise
-                result = None
+                    result = None
+            else:
+                logit = sm.Logit(y, regressors_np, missing="drop")
+                try:
+                    result = logit.fit(disp=False)
+                except (np.linalg.linalg.LinAlgError, statsmodels.tools.sm_exceptions.PerfectSeparationError) as err:
+                    if "Singular matrix" in str(err) or "Perfect separation" in str(err):
+                        if self.verbose:
+                            print(f"Phecode {phecode} ({len(cases)} cases/{len(controls)} controls):", str(err), "\n")
+                        pass
+                    else:
+                        raise
+                    result = None
 
             if result is not None:
                 # process result
@@ -457,7 +474,6 @@ class PheWAS:
                              "controls": len(controls)}
                 stats_dict = self._result_prep(result=result, var_of_interest_index=var_index)
                 result_dict = {**base_dict, **stats_dict}  # python 3.5 or later
-                # result_dict = base_dict | stats_dict  # python 3.9 or later
 
                 # choose to see results on the fly
                 if self.verbose:
@@ -472,12 +488,14 @@ class PheWAS:
 
     def run(self,
             parallelization="multithreading",
-            n_threads=round(os.cpu_count()*2/3)):
+            n_threads=round(os.cpu_count()*2/3),
+            method="logistic"):
         """
-        Run parallel logistic regressions
+        Run parallel logistic or Firth regressions
         :param parallelization: defaults to "multithreading", utilizing concurrent.futures.ThreadPoolExecutor();
                                 if "multiprocessing": use multiprocessing.Pool()
         :param n_threads: number of threads in multithreading
+        :param method: 'logistic' (default) or 'firth'
         :return: PheWAS summary statistics Polars dataframe
         """
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~    Running PheWAS    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -491,7 +509,8 @@ class PheWAS:
                         self.phecode_counts.clone(),
                         self.covariate_df.clone(),
                         copy.deepcopy(self.var_cols),
-                        copy.deepcopy(self.gender_specific_var_cols)
+                        copy.deepcopy(self.gender_specific_var_cols),
+                        method
                     ) for phecode in self.phecode_list
                 ]
                 result_dicts = [job.result() for job in tqdm(as_completed(jobs), total=len(self.phecode_list))]

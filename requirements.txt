@@ -10,5 +10,6 @@ polars
 pyarrow
 pandas
 statsmodels
+firthlogist
 tqdm
 setuptools
