@@ -106,6 +106,8 @@ celerybeat.pid
 .venv
 env/
 venv/
+venv-*/
+venv-py*/
 ENV/
 env.bak/
 venv.bak/
@@ -140,3 +142,13 @@ setup.py
 
 # docker
 docker
+
+# Test-generated data files
+*.csv
+!src/PheTK/phecode/*.csv  # Keep actual package data files
+
+# Hail log files
+hail-*.log
+
+# VS Code settings (should be project-specific)
+.vscode/

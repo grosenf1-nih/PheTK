@@ -19,8 +19,7 @@ class Phecode:
             "aou": All of Us OMOP database
             "custom": other databases; icd_df must be not None if db = "custom"
         :param icd_df_path: path to ICD table csv file; required columns are "person_id", "ICD", and "vocabulary_id";
-            "vocabulary_id" values should be "ICD9CM" or "ICD10CM"
-        """
+            "vocabulary_id" values should be "ICD9CM" or "ICD10CM"        """
         self.platform = platform
 
         if platform == "aou":
@@ -36,28 +35,29 @@ class Phecode:
                                               dtypes={"ICD": str})
             else:
                 print("icd_df_path is required for custom platform.")
+                self.icd_events = None  # Initialize to None for error case
                 sys.exit(0)
         else:
             print("Invalid platform. Parameter platform only accepts \"aou\" (All of Us) or \"custom\".")
-            sys.exit(0)
+            self.icd_events = None  # Initialize to None for error case
+            sys.exit(0)        # add flag column if not exist
+        if self.icd_events is not None:
+            if "flag" not in self.icd_events.columns:
+                self.icd_events = self.icd_events.with_columns(
+                    pl.when((pl.col("vocabulary_id") == "ICD9") |
+                            (pl.col("vocabulary_id") == "ICD9CM"))
+                    .then(9)
+                    .when((pl.col("vocabulary_id") == "ICD10") |
+                          (pl.col("vocabulary_id") == "ICD10CM"))
+                    .then(10)
+                    .otherwise(0)
+                    .alias("flag")
+                    .cast(pl.Int8)
+                )
+            else:
+                self.icd_events = self.icd_events.with_columns(pl.col("flag").cast(pl.Int8))
 
-        # add flag column if not exist
-        if "flag" not in self.icd_events.columns:
-            self.icd_events = self.icd_events.with_columns(
-                pl.when((pl.col("vocabulary_id") == "ICD9") |
-                        (pl.col("vocabulary_id") == "ICD9CM"))
-                .then(9)
-                .when((pl.col("vocabulary_id") == "ICD10") |
-                      (pl.col("vocabulary_id") == "ICD10CM"))
-                .then(10)
-                .otherwise(0)
-                .alias("flag")
-                .cast(pl.Int8)
-            )
-        else:
-            self.icd_events = self.icd_events.with_columns(pl.col("flag").cast(pl.Int8))
-
-        print("\033[1mDone!")
+            print("\033[1mDone!")
 
     def count_phecode(self, phecode_version="X", icd_version="US",
                       phecode_map_file_path=None, output_file_name=None):
@@ -99,9 +99,7 @@ class Phecode:
             phecode_counts = pl.DataFrame()
             
         if not phecode_counts.is_empty():
-            phecode_counts = phecode_counts.group_by(["person_id", "phecode"]).len().rename({"len": "count"})
-
-        # report result
+            phecode_counts = phecode_counts.group_by(["person_id", "phecode"]).len().rename({"len": "count"})        # report result
         if not phecode_counts.is_empty():
             if output_file_name is None:
                 file_name = "{0}_{1}_phecode{2}_counts.csv".format(self.platform, icd_version,
@@ -112,7 +110,8 @@ class Phecode:
             print(f"\033[1mSuccessfully generated phecode {phecode_version} counts for cohort participants!\n"
                   f"\033[1mSaved to {file_name}!\033[0m")
             print()
-
         else:
             print("\033[1mNo phecode count generated. Check your input data.\033[0m")
             print()
+        
+        return phecode_counts

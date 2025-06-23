@@ -14,6 +14,10 @@ def phecode_icd_query(ds):
     :param ds: Google BigQuery dataset ID containing OMOP data tables
     :return: a SQL query that would generate a table contains participant IDs and their ICD codes from unique dates
     """
+    if ds is None:
+        raise ValueError("Dataset name cannot be None")
+    if not isinstance(ds, (str, int)):
+        raise TypeError("Dataset name must be a string or integer")
     icd_query: str = f"""
         (
             SELECT DISTINCT

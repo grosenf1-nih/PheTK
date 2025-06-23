@@ -53,6 +53,9 @@ def get_phecode_mapping_table(phecode_version, icd_version, phecode_map_file_pat
     :param keep_all_columns: defaults to True
     :return: phecode mapping table as polars dataframe
     """
+    # Initialize phecode_df
+    phecode_df = None
+    
     # load phecode mapping file by version or by custom path
     phetk_dir = os.path.dirname(__file__)
     final_file_path = os.path.join(phetk_dir, "phecode")

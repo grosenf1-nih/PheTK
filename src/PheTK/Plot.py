@@ -10,14 +10,13 @@ import polars as pl
 class Plot:
     def __init__(self,
                  phewas_result_csv_path,
-                 converged_only=True,
+                 converged_only=False,
                  bonferroni=None,
                  phecode_version=None,
                  color_palette=None):
         """
         :param phewas_result_csv_path: path to PheWAS result csv file, generated from PheWAS module.
-        :param converged_only: whether to plot converged only or not.
-        :param bonferroni: defaults to None; if None, calculate base on number of phecode tested
+        :param converged_only: whether to plot converged only or not.        :param bonferroni: defaults to None; if None, calculate base on number of phecode tested
         :param phecode_version: defaults to None; if None, use phecode X; else phecode 1.2
         :param color_palette: defaults to None; if None, use internal color palette
         """
@@ -27,25 +26,38 @@ class Plot:
 
         # bonferroni
         if bonferroni is None:
-            self.bonferroni = -np.log10(0.05 / len(self.phewas_result))
+            if len(self.phewas_result) == 0:
+                self.bonferroni = float('inf')
+            else:
+                self.bonferroni = -np.log10(0.05 / len(self.phewas_result))
         else:
             self.bonferroni = bonferroni
 
         # remove non-converged phecodes - doing this after bonferroni to avoid bonferroni value shifting
         if converged_only:
-            self.phewas_result = self.phewas_result.filter(pl.col("converged") == "true")
+            self.phewas_result = self.phewas_result.filter(pl.col("converged") == True)
 
         # assign a proxy value for infinity neg_log_p_value
-        max_non_inf_neg_log = self.phewas_result.filter(pl.col("neg_log_p_value") != np.inf) \
-            .sort(by="neg_log_p_value", descending=True)["neg_log_p_value"][0]
-        if max_non_inf_neg_log < self.phewas_result["neg_log_p_value"].max():
-            self.inf_proxy = max_non_inf_neg_log * 1.2
-            self.phewas_result = self.phewas_result.with_columns(pl.when(pl.col("neg_log_p_value") == np.inf)
-                                                                 .then(self.inf_proxy)
-                                                                 .otherwise(pl.col("neg_log_p_value"))
-                                                                 .alias("neg_log_p_value"))
+        if len(self.phewas_result) > 0:
+            max_non_inf_neg_log_df = self.phewas_result.filter(pl.col("neg_log_p_value") != np.inf) \
+                .sort(by="neg_log_p_value", descending=True)
+            
+            if len(max_non_inf_neg_log_df) > 0:
+                max_non_inf_neg_log = max_non_inf_neg_log_df["neg_log_p_value"][0]
+                if max_non_inf_neg_log < self.phewas_result["neg_log_p_value"].max():
+                    self.inf_proxy = max_non_inf_neg_log * 1.2
+                    self.phewas_result = self.phewas_result.with_columns(pl.when(pl.col("neg_log_p_value") == np.inf)
+                                                                         .then(self.inf_proxy)
+                                                                         .otherwise(pl.col("neg_log_p_value"))
+                                                                         .alias("neg_log_p_value"))
+                else:
+                    self.inf_proxy = max_non_inf_neg_log
+            else:
+                # All values are infinity
+                self.inf_proxy = 10.0  # Default proxy value
         else:
-            self.inf_proxy = None
+            # Empty dataframe
+            self.inf_proxy = 10.0  # Default proxy value
 
         # nominal significance
         self.nominal_significance = -np.log10(0.05)
